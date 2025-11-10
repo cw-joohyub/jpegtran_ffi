@@ -27,6 +27,7 @@ apply plugin: 'kotlin-android'
 android {
     namespace 'com.example.jpegtran_ffi'
     compileSdkVersion 36
+    ndkVersion "28.1.13356709"
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
