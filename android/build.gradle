@@ -27,7 +27,6 @@ apply plugin: 'kotlin-android'
 android {
     namespace 'com.example.jpegtran_ffi'
     compileSdkVersion 36
-    ndkVersion "28.1.13356709"
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -44,6 +43,14 @@ android {
     defaultConfig {
         minSdkVersion 26
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        externalNativeBuild {
+            cmake {
+                // arm64-v8a용 16KB 페이지 사이즈 링커 플래그
+                arguments "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384",
+                          "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
+            }
+        }
     }
     lintOptions {
         disable 'InvalidPackage'
