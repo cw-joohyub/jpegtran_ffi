@@ -501,3 +501,64 @@ class _BytesIOSink implements EventSink<List<int>> {
   @override
   void close() {}
 }
+
+void preprocessYUV420PFloat32(
+    Uint8List yPlane,
+    Uint8List uPlane,
+    Uint8List vPlane,
+    int srcWidth,
+    int srcHeight,
+    int yRowStride,
+    int uRowStride,
+    int vRowStride,
+    int uPixelStride,
+    int vPixelStride,
+    int inputSize,
+    int scaledWidth,
+    int scaledHeight,
+    int padX,
+    int padY,
+    double invScale,
+    Float32List outputBuffer,
+    ) {
+  // FFI 함수에 필요한 포인터 할당
+  final yPtr = calloc<Uint8>(yPlane.length);
+  final uPtr = calloc<Uint8>(uPlane.length);
+  final vPtr = calloc<Uint8>(vPlane. length);
+  final outPtr = calloc<Float>(outputBuffer. length);
+
+  // 데이터 복사
+  yPtr.asTypedList(yPlane.length).setAll(0, yPlane);
+  uPtr.asTypedList(uPlane.length).setAll(0, uPlane);
+  vPtr.asTypedList(vPlane.length).setAll(0, vPlane);
+
+  // FFI 함수 호출
+  JpegTransformer._bindings.preprocessYUV420PFloat32(
+    yPtr,
+    uPtr,
+    vPtr,
+    srcWidth,
+    srcHeight,
+    yRowStride,
+    uRowStride,
+    vRowStride,
+    uPixelStride,
+    vPixelStride,
+    inputSize,
+    scaledWidth,
+    scaledHeight,
+    padX,
+    padY,
+    invScale,
+    outPtr,
+  );
+
+  // 결과 버퍼에 복사
+  outputBuffer.setAll(0, outPtr.asTypedList(outputBuffer.length));
+
+  // 메모리 해제
+  calloc.free(yPtr);
+  calloc.free(uPtr);
+  calloc.free(vPtr);
+  calloc. free(outPtr);
+}

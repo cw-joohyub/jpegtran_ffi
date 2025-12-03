@@ -3139,3 +3139,70 @@ DLLEXPORT int tjSaveImage(const char *filename, unsigned char *buffer,
   tj3Destroy(handle);
   return retval;
 }
+
+ /* Custom Method for Object Detection AI */
+DLLEXPORT void preprocess_yuv420p_float32(
+    const uint8_t* y_plane,
+    const uint8_t* u_plane,
+    const uint8_t* v_plane,
+    size_t src_width,
+    size_t src_height,
+    size_t y_row_stride,
+    size_t u_row_stride,
+    size_t v_row_stride,
+    size_t u_pixel_stride,
+    size_t v_pixel_stride,
+    size_t input_size,
+    size_t scaled_width,
+    size_t scaled_height,
+    size_t pad_x,
+    size_t pad_y,
+    float inv_scale,
+    float* output_buffer
+) {
+    size_t input_size3 = input_size * 3;
+    size_t src_width_minus1 = src_width - 1;
+    size_t src_height_minus1 = src_height - 1;
+
+    for (size_t dst_y = 0; dst_y < scaled_height; ++dst_y) {
+        size_t src_y = (size_t)(dst_y * inv_scale);
+        if (src_y > src_height_minus1) src_y = src_height_minus1;
+        size_t uv_src_y = src_y >> 1;
+
+        size_t y_row_start = src_y * y_row_stride;
+        size_t u_row_start = uv_src_y * u_row_stride;
+        size_t v_row_start = uv_src_y * v_row_stride;
+
+        size_t out_y = dst_y + pad_y;
+        size_t out_row_start = out_y * input_size3;
+
+        for (size_t dst_x = 0; dst_x < scaled_width; ++dst_x) {
+            size_t src_x = (size_t)(dst_x * inv_scale);
+            if (src_x > src_width_minus1) src_x = src_width_minus1;
+            size_t uv_src_x = src_x >> 1;
+
+            size_t y_idx = y_row_start + src_x;
+            size_t u_idx = u_row_start + uv_src_x * u_pixel_stride;
+            size_t v_idx = v_row_start + uv_src_x * v_pixel_stride;
+
+            uint8_t y = y_plane[y_idx];
+            uint8_t u = u_plane[u_idx];
+            uint8_t v = v_plane[v_idx];
+
+            size_t out_x_pos = dst_x + pad_x;
+            size_t out_idx = out_row_start + out_x_pos * 3;
+
+            // YUV -> RGB 변환 (BT.601 표준)
+            float yf = (float)y;
+            float uf = (float)u - 128.0f;
+            float vf = (float)v - 128.0f;
+            float r = yf + 1.402f * vf;
+            float g = yf - 0.344136f * uf - 0.714136f * vf;
+            float b = yf + 1.772f * uf;
+
+            output_buffer[out_idx + 0] = r;
+            output_buffer[out_idx + 1] = g;
+            output_buffer[out_idx + 2] = b;
+        }
+    }
+}
