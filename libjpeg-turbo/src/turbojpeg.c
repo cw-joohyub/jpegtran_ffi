@@ -3145,6 +3145,7 @@ static inline float clamp_and_normalize(float val) {
     if (val > 255.0f) return 1.0f; // 255.0 * (1/255.0) = 1.0
     return val * 0.00392156862f;   // val / 255.0 과 동일 (곱셈이 더 빠름)
 }
+
  /* Custom Method for Object Detection AI */
 DLLEXPORT void preprocess_yuv420p_float32(
                    float* output_buffer,
@@ -3166,67 +3167,120 @@ DLLEXPORT void preprocess_yuv420p_float32(
                    double inv_scale
                ) {
     size_t out_row_stride = input_size * 3;
-    size_t src_width_minus1 = src_width - 1;
-    size_t src_height_minus1 = src_height - 1;
+    size_t src_width_max = src_width - 1;
+    size_t src_height_max = src_height - 1;
+    size_t uv_width = (src_width + 1) / 2;
+    size_t uv_height = (src_height + 1) / 2;
+    size_t uv_width_max = uv_width - 1;
+    size_t uv_height_max = uv_height - 1;
 
-    // [최적화 1] X 좌표 매핑 테이블 미리 계산 (메모리 할당)
-    // 매 픽셀마다 실수 곱셈을 하는 것을 방지
-    int* x_map = (int*)malloc(scaled_width * sizeof(int));
-    int* uv_x_map = (int*)malloc(scaled_width * sizeof(int));
+    // [최적화 1] 보간용 X축 맵핑 테이블 (인덱스 및 가중치 미리 계산)
+    // 매 픽셀마다 float 연산을 제거하기 위해 가중치를 8비트 정수(0~256)로 변환
+    typedef struct { int idx0; int idx1; int w; } BilinearTable;
+    BilinearTable* y_tbl = (BilinearTable*)malloc(scaled_width * sizeof(BilinearTable));
+    BilinearTable* uv_tbl = (BilinearTable*)malloc(scaled_width * sizeof(BilinearTable));
 
+    if (!y_tbl || !uv_tbl) {
+        if (y_tbl) free(y_tbl);
+        if (uv_tbl) free(uv_tbl);
+        return; // 메모리 할당 실패 시 방어
+    }
+
+    // Y Plane X축 테이블 생성
     for (size_t i = 0; i < scaled_width; ++i) {
-        size_t src_x = (size_t)(i * inv_scale);
-        if (src_x > src_width_minus1) src_x = src_width_minus1;
+        float src_x_f = (float)(i * inv_scale);
+        int x0 = (int)src_x_f;
+        int w = (int)((src_x_f - x0) * 256.0f); // 0.0~1.0 -> 0~256
 
-        x_map[i] = (int)src_x;
-        uv_x_map[i] = (int)(src_x >> 1); // UV는 Y의 절반
+        // 경계 처리 (마지막 픽셀 접근 방지)
+        if (x0 >= (int)src_width_max) { x0 = (int)src_width_max; w = 0; }
+
+        y_tbl[i].idx0 = x0;
+        y_tbl[i].idx1 = (x0 < (int)src_width_max) ? x0 + 1 : x0;
+        y_tbl[i].w = w;
+    }
+
+    // UV Plane X축 테이블 생성 (Y의 절반 해상도에 맞춤)
+    double inv_scale_uv = inv_scale * 0.5;
+    for (size_t i = 0; i < scaled_width; ++i) {
+        float src_x_f = (float)(i * inv_scale_uv);
+        int x0 = (int)src_x_f;
+        int w = (int)((src_x_f - x0) * 256.0f);
+
+        if (x0 >= (int)uv_width_max) { x0 = (int)uv_width_max; w = 0; }
+
+        uv_tbl[i].idx0 = x0 * u_pixel_stride; // pixel stride 미리 반영
+        uv_tbl[i].idx1 = ((x0 < (int)uv_width_max) ? x0 + 1 : x0) * u_pixel_stride;
+        uv_tbl[i].w = w;
     }
 
     // Y Loop
     for (size_t dst_y = 0; dst_y < scaled_height; ++dst_y) {
-        size_t src_y = (size_t)(dst_y * inv_scale);
-        if (src_y > src_height_minus1) src_y = src_height_minus1;
-        size_t uv_src_y = src_y >> 1;
+        // [최적화 2] Y축 보간 좌표 및 가중치 계산 (행 단위 1회 수행)
+        float src_y_f = (float)(dst_y * inv_scale);
+        int y0 = (int)src_y_f;
+        int wy = (int)((src_y_f - y0) * 256.0f);
+        if (y0 >= (int)src_height_max) { y0 = (int)src_height_max; wy = 0; }
+        int y1 = (y0 < (int)src_height_max) ? y0 + 1 : y0;
 
-        // Plane 별 행 시작 주소
-        const uint8_t* y_row_ptr = y_plane + (src_y * y_row_stride);
-        const uint8_t* u_row_ptr = u_plane + (uv_src_y * u_row_stride);
-        const uint8_t* v_row_ptr = v_plane + (uv_src_y * v_row_stride);
+        const uint8_t* y_ptr0 = y_plane + (y0 * y_row_stride);
+        const uint8_t* y_ptr1 = y_plane + (y1 * y_row_stride);
 
-        // [최적화 2] 출력 포인터 직접 이동 (인덱스 계산 비용 제거)
+        // UV축 보간 좌표 (Y 좌표의 절반)
+        float src_uv_y_f = (float)(dst_y * inv_scale_uv);
+        int uv_y0 = (int)src_uv_y_f;
+        int uv_wy = (int)((src_uv_y_f - uv_y0) * 256.0f);
+        if (uv_y0 >= (int)uv_height_max) { uv_y0 = (int)uv_height_max; uv_wy = 0; }
+        int uv_y1 = (uv_y0 < (int)uv_height_max) ? uv_y0 + 1 : uv_y0;
+
+        const uint8_t* u_ptr0 = u_plane + (uv_y0 * u_row_stride);
+        const uint8_t* u_ptr1 = u_plane + (uv_y1 * u_row_stride);
+        const uint8_t* v_ptr0 = v_plane + (uv_y0 * v_row_stride);
+        const uint8_t* v_ptr1 = v_plane + (uv_y1 * v_row_stride);
+
+        // 출력 버퍼 포인터 이동
         float* out_ptr = output_buffer + ((dst_y + pad_y) * out_row_stride) + (pad_x * 3);
 
         for (size_t dst_x = 0; dst_x < scaled_width; ++dst_x) {
-            // [최적화 1 적용] 미리 계산된 좌표 사용
-            int sx = x_map[dst_x];
-            int uv_sx = uv_x_map[dst_x];
+            // --- Y 채널 Bilinear Interpolation ---
+            int y_w_x = y_tbl[dst_x].w;
+            int y_idx0 = y_tbl[dst_x].idx0;
+            int y_idx1 = y_tbl[dst_x].idx1;
 
-            // 픽셀 값 읽기 (포인터 연산)
-            uint8_t y_val = y_row_ptr[sx];
-            // UV는 stride를 고려하여 접근
-            uint8_t u_val = u_row_ptr[uv_sx * u_pixel_stride];
-            uint8_t v_val = v_row_ptr[uv_sx * v_pixel_stride];
+            // 정수 비트 시프트 연산 (>> 8 은 / 256 과 동일)
+            // 가로 방향 보간
+            int val_y_top = (y_ptr0[y_idx0] * (256 - y_w_x) + y_ptr0[y_idx1] * y_w_x) >> 8;
+            int val_y_bot = (y_ptr1[y_idx0] * (256 - y_w_x) + y_ptr1[y_idx1] * y_w_x) >> 8;
+            // 세로 방향 보간
+            float y_val = (float)((val_y_top * (256 - wy) + val_y_bot * wy) >> 8);
 
-            // YUV -> RGB 변환 (float 연산)
-            // 상수는 컴파일러가 최적화하도록 리터럴로 둠
-            float y = (float)y_val;
-            float u = (float)u_val - 128.0f;
-            float v = (float)v_val - 128.0f;
+            // --- U/V 채널 Bilinear Interpolation ---
+            int uv_w_x = uv_tbl[dst_x].w;
+            int uv_idx0 = uv_tbl[dst_x].idx0; // 이미 stride 곱해짐
+            int uv_idx1 = uv_tbl[dst_x].idx1;
 
-            // 표준 BT.601 공식
-            float r = y + 1.402f * v;
-            float g = y - 0.344136f * u - 0.714136f * v;
-            float b = y + 1.772f * u;
+            // U 가로/세로 보간
+            int val_u_top = (u_ptr0[uv_idx0] * (256 - uv_w_x) + u_ptr0[uv_idx1] * uv_w_x) >> 8;
+            int val_u_bot = (u_ptr1[uv_idx0] * (256 - uv_w_x) + u_ptr1[uv_idx1] * uv_w_x) >> 8;
+            float u_val = (float)((val_u_top * (256 - uv_wy) + val_u_bot * uv_wy) >> 8) - 128.0f;
 
-            // [최적화 3] Branchless Clamping + Normalize
-            // 나눗셈(/ 255.0) 대신 곱셈(* 0.00392...) 사용
+            // V 가로/세로 보간
+            int val_v_top = (v_ptr0[uv_idx0] * (256 - uv_w_x) + v_ptr0[uv_idx1] * uv_w_x) >> 8;
+            int val_v_bot = (v_ptr1[uv_idx0] * (256 - uv_w_x) + v_ptr1[uv_idx1] * uv_w_x) >> 8;
+            float v_val = (float)((val_v_top * (256 - uv_wy) + val_v_bot * uv_wy) >> 8) - 128.0f;
+
+            // YUV -> RGB 변환 (기존 공식 유지)
+            float r = y_val + 1.402f * v_val;
+            float g = y_val - 0.344136f * u_val - 0.714136f * v_val;
+            float b = y_val + 1.772f * u_val;
+
+            // [최적화 3] Clamp & Normalize
             *out_ptr++ = clamp_and_normalize(r);
             *out_ptr++ = clamp_and_normalize(g);
             *out_ptr++ = clamp_and_normalize(b);
         }
     }
 
-    // 메모리 해제
-    free(x_map);
-    free(uv_x_map);
+    free(y_tbl);
+    free(uv_tbl);
 }
