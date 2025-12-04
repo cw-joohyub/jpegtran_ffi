@@ -141,6 +141,7 @@ TURBOJPEG_3
 
 TURBOJPEG_3.1
 {
+    preprocess_yuv420p_float32;
     tj3GetICCProfile;
     tj3SetICCProfile;
     tj3TransformBufSize;

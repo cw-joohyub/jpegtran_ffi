@@ -228,6 +228,46 @@ typedef TJCompressFromYUVDart = int Function(
   int flags,
 );
 
+typedef PreprocessYUV420PFloat32C = Void Function(
+    Pointer<Float> outputBuffer,
+    Pointer<Uint8> yPlane,
+    Pointer<Uint8> uPlane,
+    Pointer<Uint8> vPlane,
+    Size srcWidth,
+    Size srcHeight,
+    Size yRowStride,
+    Size uRowStride,
+    Size vRowStride,
+    Size uPixelStride,
+    Size vPixelStride,
+    Size inputSize,
+    Size scaledWidth,
+    Size scaledHeight,
+    Size padX,
+    Size padY,
+    Double invScale,
+    );
+
+typedef PreprocessYUV420PFloat32Dart = void Function(
+    Pointer<Float> outputBuffer,
+    Pointer<Uint8> yPlane,
+    Pointer<Uint8> uPlane,
+    Pointer<Uint8> vPlane,
+    int srcWidth,
+    int srcHeight,
+    int yRowStride,
+    int uRowStride,
+    int vRowStride,
+    int uPixelStride,
+    int vPixelStride,
+    int inputSize,
+    int scaledWidth,
+    int scaledHeight,
+    int padX,
+    int padY,
+    double invScale,
+    );
+
 /*
 int tjDecompressHeader3(
   tjhandle handle,
@@ -268,6 +308,7 @@ class JpegTranBindings {
   late TJTransformDart tjTransform;
   late TJFreeDart tjFree;
   late TJGetErrorStrDart tjGetErrorStr;
+  late PreprocessYUV420PFloat32Dart preprocessYUV420PFloat32;
 
   JpegTranBindings() {
     final DynamicLibrary lib = (Platform.isAndroid || Platform.isLinux)
@@ -301,5 +342,9 @@ class JpegTranBindings {
 
     tjGetErrorStr =
         lib.lookupFunction<TJGetErrorStrC, TJGetErrorStrDart>("tjGetErrorStr");
+
+    preprocessYUV420PFloat32 = lib.lookupFunction<
+        PreprocessYUV420PFloat32C,
+        PreprocessYUV420PFloat32Dart>("preprocess_yuv420p_float32");
   }
 }

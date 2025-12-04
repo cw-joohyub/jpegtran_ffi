@@ -2808,6 +2808,27 @@ DLLEXPORT int tjSaveImage(const char *filename, unsigned char *buffer,
  * @}
  */
 
+ /* Custom Method for Object Detection AI */
+DLLEXPORT void preprocess_yuv420p_float32(
+    float* output_buffer,
+    const uint8_t* y_plane,
+    const uint8_t* u_plane,
+    const uint8_t* v_plane,
+    size_t src_width,
+    size_t src_height,
+    size_t y_row_stride,
+    size_t u_row_stride,
+    size_t v_row_stride,
+    size_t u_pixel_stride,
+    size_t v_pixel_stride,
+    size_t input_size,
+    size_t scaled_width,
+    size_t scaled_height,
+    size_t pad_x,
+    size_t pad_y,
+    double inv_scale
+);
+
 #ifdef __cplusplus
 }
 #endif

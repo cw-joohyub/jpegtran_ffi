@@ -501,3 +501,90 @@ class _BytesIOSink implements EventSink<List<int>> {
   @override
   void close() {}
 }
+
+class YuvProcessor {
+  Pointer<Uint8>? _yPtr;
+  Pointer<Uint8>? _uPtr;
+  Pointer<Uint8>? _vPtr;
+  Pointer<Float>? _outPtr;
+  int _lastYLen = 0;
+  int _lastULen = 0;
+  int _lastVLen = 0;
+  int _lastOutLen = 0;
+
+  void preprocessYUV420PFloat32(
+      Uint8List yPlane,
+      Uint8List uPlane,
+      Uint8List vPlane,
+      int srcWidth,
+      int srcHeight,
+      int yRowStride,
+      int uRowStride,
+      int vRowStride,
+      int uPixelStride,
+      int vPixelStride,
+      int inputSize,
+      int scaledWidth,
+      int scaledHeight,
+      int padX,
+      int padY,
+      double invScale,
+      Float32List outputBuffer,
+      ) {
+    // 버퍼 길이가 바뀔 경우에만 메모리 할당/해제
+    bool needY = _yPtr == null || _lastYLen != yPlane.length;
+    bool needU = _uPtr == null || _lastULen != uPlane.length;
+    bool needV = _vPtr == null || _lastVLen != vPlane.length;
+    bool needOut = _outPtr == null || _lastOutLen != outputBuffer.length;
+
+    if (needY) {
+      if (_yPtr != null) calloc.free(_yPtr!);
+      _yPtr = calloc<Uint8>(yPlane.length);
+      _lastYLen = yPlane.length;
+    }
+    if (needU) {
+      if (_uPtr != null) calloc.free(_uPtr!);
+      _uPtr = calloc<Uint8>(uPlane.length);
+      _lastULen = uPlane.length;
+    }
+    if (needV) {
+      if (_vPtr != null) calloc.free(_vPtr!);
+      _vPtr = calloc<Uint8>(vPlane.length);
+      _lastVLen = vPlane.length;
+    }
+    if (needOut) {
+      if (_outPtr != null) calloc.free(_outPtr!);
+      _outPtr = calloc<Float>(outputBuffer.length);
+      _lastOutLen = outputBuffer.length;
+    }
+
+    // Plane 데이터 복사 (CameraImage가 Native pointer면 패스 가능)
+    _yPtr!.asTypedList(yPlane.length).setAll(0, yPlane);
+    _uPtr!.asTypedList(uPlane.length).setAll(0, uPlane);
+    _vPtr!.asTypedList(vPlane.length).setAll(0, vPlane);
+
+    // FFI 호출
+    JpegTransformer._bindings.preprocessYUV420PFloat32(
+        _outPtr!,
+        _yPtr!, _uPtr!, _vPtr!,
+        srcWidth, srcHeight, yRowStride, uRowStride, vRowStride,
+        uPixelStride, vPixelStride, inputSize, scaledWidth, scaledHeight,
+        padX, padY, invScale,
+    );
+
+    // 결과 복사 (Native → Dart)
+    outputBuffer.setAll(0, _outPtr!.asTypedList(outputBuffer.length));
+  }
+
+  /// 반드시 앱 종료/객체 소멸 시 호출(메모리 해제)
+  void dispose() {
+    if (_yPtr != null) calloc.free(_yPtr!);
+    if (_uPtr != null) calloc.free(_uPtr!);
+    if (_vPtr != null) calloc.free(_vPtr!);
+    if (_outPtr != null) calloc.free(_outPtr!);
+    _yPtr = null;
+    _uPtr = null;
+    _vPtr = null;
+    _outPtr = null;
+  }
+}

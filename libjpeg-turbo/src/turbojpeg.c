@@ -3139,3 +3139,148 @@ DLLEXPORT int tjSaveImage(const char *filename, unsigned char *buffer,
   tj3Destroy(handle);
   return retval;
 }
+
+static inline float clamp_and_normalize(float val) {
+    if (val < 0.0f) return 0.0f;
+    if (val > 255.0f) return 1.0f; // 255.0 * (1/255.0) = 1.0
+    return val * 0.00392156862f;   // val / 255.0 과 동일 (곱셈이 더 빠름)
+}
+
+ /* Custom Method for Object Detection AI */
+DLLEXPORT void preprocess_yuv420p_float32(
+                   float* output_buffer,
+                   const uint8_t* y_plane,
+                   const uint8_t* u_plane,
+                   const uint8_t* v_plane,
+                   size_t src_width,
+                   size_t src_height,
+                   size_t y_row_stride,
+                   size_t u_row_stride,
+                   size_t v_row_stride,
+                   size_t u_pixel_stride,
+                   size_t v_pixel_stride,
+                   size_t input_size,
+                   size_t scaled_width,
+                   size_t scaled_height,
+                   size_t pad_x,
+                   size_t pad_y,
+                   double inv_scale
+               ) {
+    size_t out_row_stride = input_size * 3;
+    size_t src_width_max = src_width - 1;
+    size_t src_height_max = src_height - 1;
+    size_t uv_width = (src_width + 1) / 2;
+    size_t uv_height = (src_height + 1) / 2;
+    size_t uv_width_max = uv_width - 1;
+    size_t uv_height_max = uv_height - 1;
+
+    // [최적화 1] 보간용 X축 맵핑 테이블 (인덱스 및 가중치 미리 계산)
+    // 매 픽셀마다 float 연산을 제거하기 위해 가중치를 8비트 정수(0~256)로 변환
+    typedef struct { int idx0; int idx1; int w; } BilinearTable;
+    BilinearTable* y_tbl = (BilinearTable*)malloc(scaled_width * sizeof(BilinearTable));
+    BilinearTable* uv_tbl = (BilinearTable*)malloc(scaled_width * sizeof(BilinearTable));
+
+    if (!y_tbl || !uv_tbl) {
+        if (y_tbl) free(y_tbl);
+        if (uv_tbl) free(uv_tbl);
+        return; // 메모리 할당 실패 시 방어
+    }
+
+    // Y Plane X축 테이블 생성
+    for (size_t i = 0; i < scaled_width; ++i) {
+        float src_x_f = (float)(i * inv_scale);
+        int x0 = (int)src_x_f;
+        int w = (int)((src_x_f - x0) * 256.0f); // 0.0~1.0 -> 0~256
+
+        // 경계 처리 (마지막 픽셀 접근 방지)
+        if (x0 >= (int)src_width_max) { x0 = (int)src_width_max; w = 0; }
+
+        y_tbl[i].idx0 = x0;
+        y_tbl[i].idx1 = (x0 < (int)src_width_max) ? x0 + 1 : x0;
+        y_tbl[i].w = w;
+    }
+
+    // UV Plane X축 테이블 생성 (Y의 절반 해상도에 맞춤)
+    double inv_scale_uv = inv_scale * 0.5;
+    for (size_t i = 0; i < scaled_width; ++i) {
+        float src_x_f = (float)(i * inv_scale_uv);
+        int x0 = (int)src_x_f;
+        int w = (int)((src_x_f - x0) * 256.0f);
+
+        if (x0 >= (int)uv_width_max) { x0 = (int)uv_width_max; w = 0; }
+
+        uv_tbl[i].idx0 = x0 * u_pixel_stride; // pixel stride 미리 반영
+        uv_tbl[i].idx1 = ((x0 < (int)uv_width_max) ? x0 + 1 : x0) * u_pixel_stride;
+        uv_tbl[i].w = w;
+    }
+
+    // Y Loop
+    for (size_t dst_y = 0; dst_y < scaled_height; ++dst_y) {
+        // [최적화 2] Y축 보간 좌표 및 가중치 계산 (행 단위 1회 수행)
+        float src_y_f = (float)(dst_y * inv_scale);
+        int y0 = (int)src_y_f;
+        int wy = (int)((src_y_f - y0) * 256.0f);
+        if (y0 >= (int)src_height_max) { y0 = (int)src_height_max; wy = 0; }
+        int y1 = (y0 < (int)src_height_max) ? y0 + 1 : y0;
+
+        const uint8_t* y_ptr0 = y_plane + (y0 * y_row_stride);
+        const uint8_t* y_ptr1 = y_plane + (y1 * y_row_stride);
+
+        // UV축 보간 좌표 (Y 좌표의 절반)
+        float src_uv_y_f = (float)(dst_y * inv_scale_uv);
+        int uv_y0 = (int)src_uv_y_f;
+        int uv_wy = (int)((src_uv_y_f - uv_y0) * 256.0f);
+        if (uv_y0 >= (int)uv_height_max) { uv_y0 = (int)uv_height_max; uv_wy = 0; }
+        int uv_y1 = (uv_y0 < (int)uv_height_max) ? uv_y0 + 1 : uv_y0;
+
+        const uint8_t* u_ptr0 = u_plane + (uv_y0 * u_row_stride);
+        const uint8_t* u_ptr1 = u_plane + (uv_y1 * u_row_stride);
+        const uint8_t* v_ptr0 = v_plane + (uv_y0 * v_row_stride);
+        const uint8_t* v_ptr1 = v_plane + (uv_y1 * v_row_stride);
+
+        // 출력 버퍼 포인터 이동
+        float* out_ptr = output_buffer + ((dst_y + pad_y) * out_row_stride) + (pad_x * 3);
+
+        for (size_t dst_x = 0; dst_x < scaled_width; ++dst_x) {
+            // --- Y 채널 Bilinear Interpolation ---
+            int y_w_x = y_tbl[dst_x].w;
+            int y_idx0 = y_tbl[dst_x].idx0;
+            int y_idx1 = y_tbl[dst_x].idx1;
+
+            // 정수 비트 시프트 연산 (>> 8 은 / 256 과 동일)
+            // 가로 방향 보간
+            int val_y_top = (y_ptr0[y_idx0] * (256 - y_w_x) + y_ptr0[y_idx1] * y_w_x) >> 8;
+            int val_y_bot = (y_ptr1[y_idx0] * (256 - y_w_x) + y_ptr1[y_idx1] * y_w_x) >> 8;
+            // 세로 방향 보간
+            float y_val = (float)((val_y_top * (256 - wy) + val_y_bot * wy) >> 8);
+
+            // --- U/V 채널 Bilinear Interpolation ---
+            int uv_w_x = uv_tbl[dst_x].w;
+            int uv_idx0 = uv_tbl[dst_x].idx0; // 이미 stride 곱해짐
+            int uv_idx1 = uv_tbl[dst_x].idx1;
+
+            // U 가로/세로 보간
+            int val_u_top = (u_ptr0[uv_idx0] * (256 - uv_w_x) + u_ptr0[uv_idx1] * uv_w_x) >> 8;
+            int val_u_bot = (u_ptr1[uv_idx0] * (256 - uv_w_x) + u_ptr1[uv_idx1] * uv_w_x) >> 8;
+            float u_val = (float)((val_u_top * (256 - uv_wy) + val_u_bot * uv_wy) >> 8) - 128.0f;
+
+            // V 가로/세로 보간
+            int val_v_top = (v_ptr0[uv_idx0] * (256 - uv_w_x) + v_ptr0[uv_idx1] * uv_w_x) >> 8;
+            int val_v_bot = (v_ptr1[uv_idx0] * (256 - uv_w_x) + v_ptr1[uv_idx1] * uv_w_x) >> 8;
+            float v_val = (float)((val_v_top * (256 - uv_wy) + val_v_bot * uv_wy) >> 8) - 128.0f;
+
+            // YUV -> RGB 변환 (기존 공식 유지)
+            float r = y_val + 1.402f * v_val;
+            float g = y_val - 0.344136f * u_val - 0.714136f * v_val;
+            float b = y_val + 1.772f * u_val;
+
+            // [최적화 3] Clamp & Normalize
+            *out_ptr++ = clamp_and_normalize(r);
+            *out_ptr++ = clamp_and_normalize(g);
+            *out_ptr++ = clamp_and_normalize(b);
+        }
+    }
+
+    free(y_tbl);
+    free(uv_tbl);
+}
