@@ -3140,6 +3140,11 @@ DLLEXPORT int tjSaveImage(const char *filename, unsigned char *buffer,
   return retval;
 }
 
+static inline float clamp_and_normalize(float val) {
+    if (val < 0.0f) return 0.0f;
+    if (val > 255.0f) return 1.0f; // 255.0 * (1/255.0) = 1.0
+    return val * 0.00392156862f;   // val / 255.0 과 동일 (곱셈이 더 빠름)
+}
  /* Custom Method for Object Detection AI */
 DLLEXPORT void preprocess_yuv420p_float32(
                    float* output_buffer,
@@ -3160,49 +3165,68 @@ DLLEXPORT void preprocess_yuv420p_float32(
                    size_t pad_y,
                    double inv_scale
                ) {
-    size_t input_size3 = input_size * 3;
+    size_t out_row_stride = input_size * 3;
     size_t src_width_minus1 = src_width - 1;
     size_t src_height_minus1 = src_height - 1;
 
+    // [최적화 1] X 좌표 매핑 테이블 미리 계산 (메모리 할당)
+    // 매 픽셀마다 실수 곱셈을 하는 것을 방지
+    int* x_map = (int*)malloc(scaled_width * sizeof(int));
+    int* uv_x_map = (int*)malloc(scaled_width * sizeof(int));
+
+    for (size_t i = 0; i < scaled_width; ++i) {
+        size_t src_x = (size_t)(i * inv_scale);
+        if (src_x > src_width_minus1) src_x = src_width_minus1;
+
+        x_map[i] = (int)src_x;
+        uv_x_map[i] = (int)(src_x >> 1); // UV는 Y의 절반
+    }
+
+    // Y Loop
     for (size_t dst_y = 0; dst_y < scaled_height; ++dst_y) {
         size_t src_y = (size_t)(dst_y * inv_scale);
         if (src_y > src_height_minus1) src_y = src_height_minus1;
         size_t uv_src_y = src_y >> 1;
 
-        size_t y_row_start = src_y * y_row_stride;
-        size_t u_row_start = uv_src_y * u_row_stride;
-        size_t v_row_start = uv_src_y * v_row_stride;
+        // Plane 별 행 시작 주소
+        const uint8_t* y_row_ptr = y_plane + (src_y * y_row_stride);
+        const uint8_t* u_row_ptr = u_plane + (uv_src_y * u_row_stride);
+        const uint8_t* v_row_ptr = v_plane + (uv_src_y * v_row_stride);
 
-        size_t out_y = dst_y + pad_y;
-        size_t out_row_start = out_y * input_size3;
+        // [최적화 2] 출력 포인터 직접 이동 (인덱스 계산 비용 제거)
+        float* out_ptr = output_buffer + ((dst_y + pad_y) * out_row_stride) + (pad_x * 3);
 
         for (size_t dst_x = 0; dst_x < scaled_width; ++dst_x) {
-            size_t src_x = (size_t)(dst_x * inv_scale);
-            if (src_x > src_width_minus1) src_x = src_width_minus1;
-            size_t uv_src_x = src_x >> 1;
+            // [최적화 1 적용] 미리 계산된 좌표 사용
+            int sx = x_map[dst_x];
+            int uv_sx = uv_x_map[dst_x];
 
-            size_t y_idx = y_row_start + src_x;
-            size_t u_idx = u_row_start + uv_src_x * u_pixel_stride;
-            size_t v_idx = v_row_start + uv_src_x * v_pixel_stride;
+            // 픽셀 값 읽기 (포인터 연산)
+            uint8_t y_val = y_row_ptr[sx];
+            // UV는 stride를 고려하여 접근
+            uint8_t u_val = u_row_ptr[uv_sx * u_pixel_stride];
+            uint8_t v_val = v_row_ptr[uv_sx * v_pixel_stride];
 
-            uint8_t y = y_plane[y_idx];
-            uint8_t u = u_plane[u_idx];
-            uint8_t v = v_plane[v_idx];
+            // YUV -> RGB 변환 (float 연산)
+            // 상수는 컴파일러가 최적화하도록 리터럴로 둠
+            float y = (float)y_val;
+            float u = (float)u_val - 128.0f;
+            float v = (float)v_val - 128.0f;
 
-            size_t out_x_pos = dst_x + pad_x;
-            size_t out_idx = out_row_start + out_x_pos * 3;
+            // 표준 BT.601 공식
+            float r = y + 1.402f * v;
+            float g = y - 0.344136f * u - 0.714136f * v;
+            float b = y + 1.772f * u;
 
-            // YUV -> RGB 변환 (BT.601 표준)
-            float yf = (float)y;
-            float uf = (float)u - 128.0f;
-            float vf = (float)v - 128.0f;
-            float r = yf + 1.402f * vf;
-            float g = yf - 0.344136f * uf - 0.714136f * vf;
-            float b = yf + 1.772f * uf;
-
-            output_buffer[out_idx + 0] = r;
-            output_buffer[out_idx + 1] = g;
-            output_buffer[out_idx + 2] = b;
+            // [최적화 3] Branchless Clamping + Normalize
+            // 나눗셈(/ 255.0) 대신 곱셈(* 0.00392...) 사용
+            *out_ptr++ = clamp_and_normalize(r);
+            *out_ptr++ = clamp_and_normalize(g);
+            *out_ptr++ = clamp_and_normalize(b);
         }
     }
+
+    // 메모리 해제
+    free(x_map);
+    free(uv_x_map);
 }
